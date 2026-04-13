@@ -27,7 +27,7 @@ from core.dependency_graph import DependencyGraphBuilder
 from models.schemas import AgentResult, ChangedFile, RepoConventions
 
 # Target repo to analyze
-TARGET_REPO = "/Users/sairakshithmuda/Desktop/Claude code/job-assistant"
+TARGET_REPO = os.environ.get("CODESAGE_TARGET_REPO", os.path.expanduser("~/repos/sample-repo"))
 
 LANGUAGE_MAP = {
     ".py": "python",
