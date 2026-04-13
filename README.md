@@ -9,7 +9,18 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![CI](https://img.shields.io/badge/CI-passing-brightgreen.svg)](.github/workflows/ci.yml)
 
-![CodeSage Demo](https://via.placeholder.com/800x400?text=CodeSage+Demo+GIF)
+## Why I Built This
+
+By 2026, 54% of PRs in production codebases receive AI-powered analysis, and engineering teams report 40% faster merge cycles. But most AI code review tools treat every repo the same — generic rules applied generically. CodeSage is different: it **learns your repo's conventions** from past merged PRs and checks new code against your team's actual patterns, not textbook rules.
+
+## Technical Highlights
+
+- **Convention learning:** StyleAdvisor analyzes the last 3 merged PRs to learn your repo's naming conventions, import patterns, and code style — then enforces them
+- **True parallel execution:** 4 agents run simultaneously via `asyncio.gather()` with `return_exceptions=True` — one failing agent doesn't block the others
+- **Cross-agent deduplication:** When BugDetector and SecurityScanner flag the same line, findings are merged with combined tags `[SECURITY][BUG]` and highest severity wins
+- **Diff position mapping:** Inline GitHub comments land at the exact right line using a custom diff-position mapper (GitHub's API requires diff-relative positions, not absolute line numbers)
+- **tree-sitter AST parsing:** Language-agnostic code analysis across Python, JavaScript, and TypeScript with a single parsing engine
+- **GitHub App auth:** JWT → installation token flow (not PATs), with RQ workers for async processing
 
 ---
 
