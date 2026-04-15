@@ -138,7 +138,7 @@ In your GitHub App settings, set the webhook URL to your server's public URL:
 
 ```bash
 # Clone and install
-git clone <your-repo-url> && cd codesage
+git clone https://github.com/rakshithmuda22/codesage.git && cd codesage
 pip install -r requirements.txt
 
 # Start Redis
@@ -250,6 +250,8 @@ When BugDetector and SecurityScanner both flag the same line, the Deduplicator m
 ```bash
 pytest tests/ -v --tb=short
 ```
+
+As of the latest `main`, the suite is **38** pytest tests covering agents, GitHub flows, and workers (external calls mocked).
 
 ## License
 
