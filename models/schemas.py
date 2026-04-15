@@ -72,7 +72,7 @@ class ReviewJob(BaseModel):
     head_sha: str
     base_sha: str
     installation_id: int
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=datetime.now)
     status: str = "queued"
 
 
