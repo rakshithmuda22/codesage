@@ -5,9 +5,9 @@ PyGithub==2.1.1
 PyJWT==2.8.0
 cryptography==42.0.2
 gitpython==3.1.41
+# Parsing uses tree_sitter_languages.get_parser(); standalone grammar pins were unused
+# and tree-sitter-python==0.21.0 is no longer published on PyPI.
 tree-sitter==0.21.3
-tree-sitter-python==0.21.0
-tree-sitter-javascript==0.21.4
 tree-sitter-languages==1.10.2
 networkx==3.2.1
 redis==5.0.1
