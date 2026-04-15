@@ -177,7 +177,7 @@ async def github_webhook(request: Request) -> JSONResponse:
         head_sha=pr.get("head", {}).get("sha", ""),
         base_sha=pr.get("base", {}).get("sha", ""),
         installation_id=installation.get("id", 0),
-        created_at=datetime.utcnow(),
+        created_at=datetime.now(tz=None),
         status="queued",
     )
 
