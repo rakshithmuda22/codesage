@@ -7,7 +7,6 @@ Reads files directly from disk and runs all 4 agents in parallel.
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import sys
 import time
