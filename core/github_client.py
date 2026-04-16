@@ -28,6 +28,11 @@ logger = logging.getLogger("codesage")
 GITHUB_API = "https://api.github.com"
 
 
+def _basic_auth(token: str) -> str:
+    """Base64-encode 'x-access-token:<token>' for HTTP Basic auth."""
+    return base64.b64encode(f"x-access-token:{token}".encode()).decode()
+
+
 class DiffParser:
     """Parses unified diffs to map absolute line numbers to diff positions.
 
@@ -546,10 +551,23 @@ class GitHubClient:
         """
         token = await self.get_installation_token()
         tmp_dir = os.path.join(tempfile.gettempdir(), str(uuid.uuid4()))
-        clone_url = f"https://x-access-token:{token}@github.com/{repo}.git"
+        # Avoid putting the token in the URL — it would land in shell history,
+        # process args, and git config. Use an askpass-style env helper instead.
+        clone_url = f"https://github.com/{repo}.git"
+        env = {
+            **os.environ,
+            "GIT_ASKPASS": "/bin/echo",
+            "GIT_USERNAME": "x-access-token",
+            "GIT_PASSWORD": token,
+            # Prevent git from writing credentials to disk
+            "GIT_TERMINAL_PROMPT": "0",
+        }
+        header = f"AUTHORIZATION: Basic {_basic_auth(token)}"
 
         git_repo = GitRepo.clone_from(
-            clone_url, tmp_dir, depth=1, no_checkout=True
+            clone_url, tmp_dir, depth=1, no_checkout=True,
+            env=env,
+            config=f"http.extraheader={header}",
         )
         git_repo.git.checkout(sha)
 

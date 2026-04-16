@@ -114,26 +114,43 @@ async def github_webhook(request: Request) -> JSONResponse:
     body = await request.body()
     webhook_secret = os.environ.get("GITHUB_WEBHOOK_SECRET", "")
 
-    if webhook_secret:
-        expected = "sha256=" + hmac.new(
-            webhook_secret.encode(),
-            body,
-            hashlib.sha256,
-        ).hexdigest()
-        if not hmac.compare_digest(signature, expected):
-            logger.warning(
-                json.dumps({
-                    "timestamp": time.time(),
-                    "level": "WARNING",
-                    "agent": "Webhook",
-                    "job_id": "",
-                    "message": "Invalid webhook signature rejected",
-                })
-            )
-            raise HTTPException(
-                status_code=401,
-                detail="Invalid webhook signature",
-            )
+    if not webhook_secret:
+        # Fail closed. A missing secret is almost always a deploy mistake;
+        # silently accepting unauthenticated webhooks would let anyone
+        # enqueue review jobs and burn the Groq quota.
+        logger.error(
+            json.dumps({
+                "timestamp": time.time(),
+                "level": "ERROR",
+                "agent": "Webhook",
+                "job_id": "",
+                "message": "GITHUB_WEBHOOK_SECRET not configured; refusing request",
+            })
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Webhook secret not configured",
+        )
+
+    expected = "sha256=" + hmac.new(
+        webhook_secret.encode(),
+        body,
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(signature, expected):
+        logger.warning(
+            json.dumps({
+                "timestamp": time.time(),
+                "level": "WARNING",
+                "agent": "Webhook",
+                "job_id": "",
+                "message": "Invalid webhook signature rejected",
+            })
+        )
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid webhook signature",
+        )
 
     # 2. Parse event
     event_type = request.headers.get("X-GitHub-Event", "")
