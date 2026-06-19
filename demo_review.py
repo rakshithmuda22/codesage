@@ -114,7 +114,7 @@ async def run_demo():
     """Run the full CodeSage review pipeline on a local repo."""
     print("=" * 70)
     print("  CodeSage Demo Review")
-    print("  Target: job-assistant repository")
+    print(f"  Target: {TARGET_REPO}")
     print("=" * 70)
     print()
 
@@ -237,8 +237,8 @@ async def run_demo():
         final_findings,
         agent_results,
         {
-            "pr_title": "Job Assistant Codebase Review",
-            "repo_full_name": "sairakshithmuda/job-assistant",
+            "pr_title": "Demo Codebase Review",
+            "repo_full_name": os.path.basename(os.path.normpath(TARGET_REPO)),
         },
     )
     for line in summary.split("\n"):

@@ -7,7 +7,7 @@
 [![Groq](https://img.shields.io/badge/Groq-LLaMA%203.1-orange.svg)](https://console.groq.com)
 [![Redis](https://img.shields.io/badge/Redis-7-red.svg)](https://redis.io)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![CI](https://img.shields.io/badge/CI-passing-brightgreen.svg)](.github/workflows/ci.yml)
+[![CI](https://github.com/rakshithmuda22/codesage/actions/workflows/ci.yml/badge.svg)](https://github.com/rakshithmuda22/codesage/actions/workflows/ci.yml)
 
 ## Why I Built This
 
@@ -163,25 +163,19 @@ ngrok http 8000
 
 ### Test the Webhook Locally
 
+Signature verification is always on — a valid `X-Hub-Signature-256` is required and cannot be bypassed (a missing `GITHUB_WEBHOOK_SECRET` returns `503`, an invalid signature returns `401`). Set a known secret in your `.env` (e.g. `GITHUB_WEBHOOK_SECRET=test-secret`), then sign the exact payload with that same secret:
+
 ```bash
+SECRET="test-secret"   # must match GITHUB_WEBHOOK_SECRET in your .env
+PAYLOAD='{"action":"opened","pull_request":{"number":1,"title":"Test PR","head":{"sha":"abc123"},"base":{"sha":"def456"}},"repository":{"full_name":"owner/repo"},"installation":{"id":12345}}'
+SIG=$(printf '%s' "$PAYLOAD" | openssl dgst -sha256 -hmac "$SECRET" | awk '{print $NF}')
+
 curl -X POST http://localhost:8000/webhook/github \
   -H "Content-Type: application/json" \
   -H "X-GitHub-Event: pull_request" \
-  -H "X-Hub-Signature-256: sha256=test" \
-  -d '{
-    "action": "opened",
-    "pull_request": {
-      "number": 1,
-      "title": "Test PR",
-      "head": {"sha": "abc123"},
-      "base": {"sha": "def456"}
-    },
-    "repository": {"full_name": "owner/repo"},
-    "installation": {"id": 12345}
-  }'
+  -H "X-Hub-Signature-256: sha256=$SIG" \
+  -d "$PAYLOAD"
 ```
-
-> **Note:** For local testing without signature verification, temporarily remove the webhook secret from `.env`.
 
 ## Common Setup Mistake
 
