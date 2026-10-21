@@ -326,3 +326,14 @@ class TestFormatting:
         formatted = dedup.format_finding_for_github(finding)
         assert "if x is not None:" in formatted
         assert "```" in formatted
+
+
+class TestExecutiveSummary:
+    """Tests for the PR summary comment."""
+
+    def test_files_reviewed_is_not_summed_across_agents(self, sample_agent_results):
+        """Four agents that each saw 3 files reviewed 3 files, not 12."""
+        summary = Deduplicator.generate_executive_summary(
+            [], sample_agent_results, {"pr_title": "t", "repo_full_name": "o/r"}
+        )
+        assert "**Files reviewed:** 3" in summary

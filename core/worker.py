@@ -15,7 +15,8 @@ import time
 from typing import Any
 
 import redis
-from rq import Queue
+from dotenv import load_dotenv
+from rq import Queue, Retry
 
 from agents.bug_detector import BugDetector
 from agents.security_scanner import SecurityScanner
@@ -26,6 +27,7 @@ from core.deduplicator import Deduplicator
 from core.dependency_graph import DependencyGraphBuilder
 from core.github_client import GitHubClient
 from core.llm_client import LLMClient
+from core.logging_setup import configure_logging
 from core.repo_analyzer import RepoAnalyzer
 from models.schemas import AgentResult, ReviewJob, ReviewSummary
 
@@ -91,6 +93,8 @@ class ReviewWorker:
             job.model_dump(mode="json"),
             job_timeout=300,
             result_ttl=86400,
+            # Transient GitHub/Groq failures: retry twice, 30 s then 2 min apart.
+            retry=Retry(max=2, interval=[30, 120]),
         )
         logger.info(
             json.dumps({
@@ -146,6 +150,8 @@ def process_review_sync(job_dict: dict[str, Any]) -> dict[str, Any]:
     Returns:
         Serialized ReviewSummary dictionary.
     """
+    load_dotenv()  # a bare `rq worker` does not read .env on its own
+    configure_logging()
     return asyncio.run(process_review(job_dict))
 
 

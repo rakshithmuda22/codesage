@@ -4,7 +4,7 @@
 Accepted
 
 ## Context
-GitHub webhooks have a 10-second timeout. If the webhook endpoint doesn't return within 10 seconds, GitHub marks the delivery as failed and may disable the webhook. A full code review takes 30-90 seconds.
+GitHub webhooks have a 10-second timeout. If the webhook endpoint doesn't return within 10 seconds, GitHub marks the delivery as failed and may disable the webhook. A review makes several LLM calls (rate limited to 30 per minute on Groq's free tier) plus GitHub API calls, so it can easily run longer than that.
 
 ## Options Considered
 
@@ -18,12 +18,12 @@ We chose **Redis + RQ** (Redis Queue).
 
 ## Rationale
 
-- **GitHub's 10-second timeout**: The webhook handler must return 200 within 10 seconds. A code review with 4 parallel agents, LLM calls, and GitHub API interactions takes 30-90 seconds. We must decouple receiving the webhook from processing the review.
+- **GitHub's 10-second timeout**: The webhook handler must return 200 within 10 seconds. A code review with 4 parallel agents, LLM calls, and GitHub API interactions can run well past that. We must decouple receiving the webhook from processing the review.
 - **Why not BackgroundTasks**: FastAPI's BackgroundTasks run in the same process. If the server restarts, in-progress reviews are lost. There's no retry mechanism, no job status tracking, and no way to scale workers independently.
 - **Why not Celery**: Celery is powerful but heavyweight for this use case. It requires a message broker (RabbitMQ or Redis) plus result backend, adds significant configuration complexity, and is overkill for a single job type.
 - **Why RQ fits**: RQ is lightweight (pure Python, Redis-only), provides exactly what we need: job queuing, status tracking, retry on failure, result storage, and timeout handling. It's simple to configure and debug.
 - **Worker scaling**: RQ workers can be scaled independently. During high-traffic periods, add more worker containers. The Redis queue distributes jobs automatically.
-- **Retry on failure**: If a review fails (LLM timeout, GitHub API error), RQ automatically retries the job. Failed jobs are tracked and can be inspected.
+- **Retry on failure**: Jobs are enqueued with `Retry(max=2, interval=[30, 120])`, so a transient LLM or GitHub error is retried twice before the job lands in RQ's failed registry, where it can be inspected.
 - **Job status API**: RQ stores job status and results in Redis, enabling our `/jobs/{job_id}` status endpoint and dashboard polling.
 
 ## Consequences

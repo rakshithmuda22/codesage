@@ -270,6 +270,11 @@ def test_job_goes_through_redis_and_an_rq_worker(pipeline, monkeypatch):
     rw = worker.ReviewWorker(redis_url=url)
     rq_id = rw.enqueue_review(ReviewJob(**JOB))
     assert rw.get_job_status(rq_id)["status"] == "queued"
+    # Failed reviews are retried (twice) rather than silently dropped.
+    from rq.job import Job
+    queued = Job.fetch(rq_id, connection=conn)
+    assert queued.retries_left == 2
+    assert queued.retry_intervals == [30, 120]
 
     SimpleWorker([rw.queue], connection=conn).work(burst=True)
 

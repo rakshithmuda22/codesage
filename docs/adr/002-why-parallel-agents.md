@@ -18,10 +18,10 @@ We chose **4 parallel specialized agents**: BugDetector, SecurityScanner, StyleA
 ## Rationale
 
 - **Specialization improves accuracy**: Each agent has a focused system prompt optimized for its domain. The SecurityScanner knows OWASP Top 10 patterns. The BugDetector focuses on null dereferences and off-by-one errors. A single prompt trying to do everything produces lower-quality results because the LLM's attention is split.
-- **4x faster execution**: With `asyncio.gather()`, all 4 agents analyze files simultaneously. A review that takes 30 seconds sequentially completes in ~8 seconds with parallel execution.
+- **Latency is the slowest agent, not the sum**: With `asyncio.gather()`, all 4 agents analyze files simultaneously. `tests/test_worker.py` checks this with four stub agents that each sleep 0.2 s: they all start before the first finishes and the pipeline takes about 0.2 s instead of 0.8 s.
 - **Independent failure handling**: If the SecurityScanner hits a rate limit, the other 3 agents still complete. With a single prompt, one failure means zero results.
 - **Easier debugging**: When a finding is incorrect, we can trace it to a specific agent and adjust that agent's prompt without affecting the others.
-- **Different thresholds**: Security issues warrant lower confidence thresholds (we'd rather false-positive on a secret leak than miss it). Style issues use higher thresholds. A single prompt can't easily apply different confidence filters.
+- **Different thresholds**: Security issues warrant a lower confidence cut-off (0.5 for LLM findings; regex hits are 0.9) because a missed secret is worse than a false alarm; BugDetector and StyleAdvisor drop findings under 0.6, and StyleAdvisor caps severity at MEDIUM. A single prompt can't easily apply different filters per category.
 - **Different techniques**: SecurityScanner uses fast regex matching before LLM analysis. TestCoverage cross-references test files. These specialized approaches aren't possible in a single prompt.
 
 ## Consequences

@@ -180,7 +180,7 @@ class Deduplicator:
             key=lambda f: SEVERITY_ORDER.get(f.severity, 5),
         )
 
-        agents = list({f.agent for f in group})
+        agents = sorted({f.agent for f in group})
         agent_tags = "".join(
             f"[{a.upper().replace('AGENT', '').strip()}]"
             for a in sorted(agents)
@@ -192,7 +192,7 @@ class Deduplicator:
             descriptions.append(prefix + f.description)
         merged_description = "\n\n".join(descriptions)
 
-        suggestions = list({f.suggestion for f in group})
+        suggestions = list(dict.fromkeys(f.suggestion for f in group))
         merged_suggestion = " | ".join(suggestions)
 
         max_confidence = max(f.confidence for f in group)
@@ -309,9 +309,12 @@ class Deduplicator:
         low = severity_counts.get("LOW", 0)
         info = severity_counts.get("INFO", 0)
 
-        files_reviewed = sum(
-            r.files_analyzed for r in agent_results
-            if isinstance(r, AgentResult)
+        # Every agent looks at (roughly) the same files, so take the
+        # largest count rather than summing four overlapping ones.
+        files_reviewed = max(
+            (r.files_analyzed for r in agent_results
+             if isinstance(r, AgentResult)),
+            default=0,
         )
         total_time = sum(
             r.processing_time_seconds for r in agent_results

@@ -12,7 +12,6 @@ import hmac
 import json
 import logging
 import os
-import sys
 import time
 import uuid
 from datetime import datetime
@@ -24,48 +23,13 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from core.llm_client import DEFAULT_GROQ_MODEL
+from core.logging_setup import configure_logging
 from core.worker import ReviewWorker
 from models.schemas import ReviewJob
 
 load_dotenv()
 
-# ---------------------------------------------------------------------------
-# Structured JSON logging
-# ---------------------------------------------------------------------------
-
-
-class JSONFormatter(logging.Formatter):
-    """JSON log formatter for structured logging.
-
-    Formats log records as JSON objects with timestamp, level,
-    and message fields.
-    """
-
-    def format(self, record: logging.LogRecord) -> str:
-        """Format a log record as a JSON string.
-
-        Args:
-            record: Log record to format.
-
-        Returns:
-            JSON-formatted log string.
-        """
-        log_data = {
-            "timestamp": time.time(),
-            "level": record.levelname,
-            "agent": getattr(record, "agent", "Main"),
-            "job_id": getattr(record, "job_id", ""),
-            "message": record.getMessage(),
-        }
-        return json.dumps(log_data)
-
-
-handler = logging.StreamHandler(sys.stdout)
-handler.setFormatter(JSONFormatter())
-logging.basicConfig(
-    level=os.environ.get("LOG_LEVEL", "INFO"),
-    handlers=[handler],
-)
+configure_logging()
 logger = logging.getLogger("codesage")
 
 # ---------------------------------------------------------------------------
