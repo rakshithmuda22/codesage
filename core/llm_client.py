@@ -19,7 +19,18 @@ from groq import AsyncGroq, RateLimitError, APIError
 
 logger = logging.getLogger("codesage")
 
-DEFAULT_GROQ_MODEL = "llama-3.1-8b-instant"
+# Groq's deprecations page lists llama-3.1-8b-instant for shutdown on
+# 2026-08-16 (free/developer tiers) and recommends openai/gpt-oss-20b.
+DEFAULT_GROQ_MODEL = "openai/gpt-oss-20b"
+
+# Reasoning models spend completion tokens on their (hidden) reasoning
+# before the JSON answer; without headroom the answer can be cut off.
+REASONING_TOKEN_HEADROOM = 2048
+
+
+def is_reasoning_model(model: str) -> bool:
+    """Whether ``model`` accepts Groq's reasoning parameters."""
+    return "gpt-oss" in model
 
 
 class LLMClient:
@@ -45,7 +56,7 @@ class LLMClient:
         Args:
             api_key: Groq API key. Falls back to GROQ_API_KEY env var.
             model: Model ID for completions. Falls back to the
-                GROQ_MODEL env var, then llama-3.1-8b-instant.
+                GROQ_MODEL env var, then openai/gpt-oss-20b.
             max_concurrent: Maximum concurrent API calls.
             max_calls_per_minute: Rate limit (Groq free tier = 30).
 
@@ -61,6 +72,7 @@ class LLMClient:
         self.model = (
             model or os.environ.get("GROQ_MODEL") or DEFAULT_GROQ_MODEL
         )
+        self.reasoning_effort = os.environ.get("GROQ_REASONING_EFFORT", "low")
         self.semaphore = asyncio.Semaphore(max_concurrent)
         self.max_calls_per_minute = max_calls_per_minute
         self.call_timestamps: list[float] = []
@@ -137,6 +149,15 @@ class LLMClient:
                         "max_tokens": max_tokens,
                         "temperature": temperature,
                     }
+                    if is_reasoning_model(self.model):
+                        response_kwargs["max_tokens"] = (
+                            max_tokens + REASONING_TOKEN_HEADROOM
+                        )
+                        # Sent via extra_body so older groq SDKs pass it through.
+                        response_kwargs["extra_body"] = {
+                            "reasoning_effort": self.reasoning_effort,
+                            "include_reasoning": False,
+                        }
                     if response_format == "json":
                         response_kwargs["response_format"] = {
                             "type": "json_object"
@@ -146,7 +167,16 @@ class LLMClient:
                         **response_kwargs
                     )
                     latency = time.time() - start
-                    content = response.choices[0].message.content or "{}"
+                    choice = response.choices[0]
+                    content = choice.message.content or ""
+                    if not content.strip():
+                        # Typically finish_reason == "length": the model used
+                        # its budget before answering. Retry rather than
+                        # silently reporting "no findings".
+                        raise ValueError(
+                            "empty LLM response "
+                            f"(finish_reason={choice.finish_reason})"
+                        )
                     tokens_used = (
                         response.usage.total_tokens
                         if response.usage
@@ -286,7 +316,10 @@ class LLMClient:
 
     @staticmethod
     def _parse_json(content: str) -> dict[str, Any]:
-        """Parse JSON from LLM response, stripping markdown fences.
+        """Parse a JSON object from an LLM response.
+
+        Tolerates a markdown code fence and prose around the object
+        (reasoning models sometimes add either).
 
         Args:
             content: Raw string content from the LLM.
@@ -295,7 +328,8 @@ class LLMClient:
             Parsed dictionary.
 
         Raises:
-            json.JSONDecodeError: If content is not valid JSON.
+            json.JSONDecodeError: If no JSON object can be parsed.
+            ValueError: If the JSON is not an object.
         """
         cleaned = content.strip()
         if cleaned.startswith("```"):
@@ -304,4 +338,13 @@ class LLMClient:
             if lines and lines[-1].strip() == "```":
                 lines = lines[:-1]
             cleaned = "\n".join(lines).strip()
-        return json.loads(cleaned)
+        try:
+            result = json.loads(cleaned)
+        except json.JSONDecodeError:
+            start, end = cleaned.find("{"), cleaned.rfind("}")
+            if start == -1 or end <= start:
+                raise
+            result = json.loads(cleaned[start:end + 1])
+        if not isinstance(result, dict):
+            raise ValueError("LLM JSON response is not an object")
+        return result

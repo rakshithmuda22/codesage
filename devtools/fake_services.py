@@ -369,7 +369,11 @@ async def chat_completions(request: Request):
     user = next((m["content"] for m in body["messages"]
                  if m["role"] == "user"), "")
     answer = scripted_answer(system, user)
-    _log("scripted LLM answered", findings=len(answer.get("findings", [])))
+    _log("scripted LLM answered", model=body.get("model"),
+         reasoning_effort=body.get("reasoning_effort"),
+         include_reasoning=body.get("include_reasoning"),
+         max_tokens=body.get("max_tokens"),
+         findings=len(answer.get("findings", [])))
     return {
         "id": "fake", "object": "chat.completion", "created": int(time.time()),
         "model": body.get("model", "fake"),

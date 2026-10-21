@@ -5,7 +5,7 @@
 [![CI](https://github.com/rakshithmuda22/codesage/actions/workflows/ci.yml/badge.svg)](https://github.com/rakshithmuda22/codesage/actions/workflows/ci.yml)
 [![Python 3.11](https://img.shields.io/badge/python-3.11-blue.svg)](https://www.python.org/downloads/release/python-3110/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.109-009688.svg)](https://fastapi.tiangolo.com)
-[![Groq](https://img.shields.io/badge/Groq-Llama%203.1-orange.svg)](https://console.groq.com)
+[![Groq](https://img.shields.io/badge/Groq-gpt--oss--20b-orange.svg)](https://console.groq.com)
 [![Redis](https://img.shields.io/badge/Redis-7-red.svg)](https://redis.io)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
@@ -120,7 +120,8 @@ curl -X POST http://localhost:8000/webhook/github \
 |---|---|
 | `GITHUB_APP_ID`, `GITHUB_PRIVATE_KEY_PATH` | GitHub App credentials |
 | `GITHUB_WEBHOOK_SECRET` | Required. If unset the webhook answers `503`; a missing or wrong signature gets `401` |
-| `GROQ_API_KEY`, `GROQ_MODEL` | Groq key and model (default `llama-3.1-8b-instant`) |
+| `GROQ_API_KEY`, `GROQ_MODEL` | Groq key and model (default `openai/gpt-oss-20b`; `llama-3.1-8b-instant`, the previous default, is scheduled for shutdown on Groq on 2026-08-16) |
+| `GROQ_REASONING_EFFORT` | `low` (default), `medium` or `high`; only sent for gpt-oss models, together with `include_reasoning=false` and extra `max_tokens` headroom for the hidden reasoning |
 | `REDIS_URL` | Redis for the queue and the convention cache |
 | `CODESAGE_POST_VERDICTS` | `true` to post `APPROVE` / `REQUEST_CHANGES`. Default: every review is a plain `COMMENT`, so the bot never approves or blocks a merge |
 | `GITHUB_API_URL`, `GROQ_BASE_URL` | Point at GitHub Enterprise, or at the fakes used by the demo |
@@ -167,7 +168,7 @@ All four agents run under one `asyncio.gather(..., return_exceptions=True)`, and
 
 ```text
 $ pytest
-126 passed
+136 passed
 ```
 
 (`tests/test_worker.py::test_job_goes_through_redis_and_an_rq_worker` needs a Redis on `REDIS_URL` and is skipped without one.)
@@ -176,16 +177,17 @@ $ pytest
 |---|---|---|
 | `test_diff_parser.py` | 39 | Hand-computed positions; paths containing `b/`; `--`/`++` content lines; renames, deletes, binary files, "No newline" markers; 25 randomized runs against real `git diff` output that verify every mapped line points at the same text in the new file |
 | `test_github_review.py` | 6 | JSON sent to GitHub (line/side), out-of-diff findings go to the summary, 422 fallback, body size cap |
-| `test_webhook.py` | 21 | Fails closed: no secret, no/wrong/tampered/non-ASCII signature, legacy sha1 header. Event routing, queue outage |
+| `test_webhook.py` | 22 | Fails closed: no secret, no/wrong/tampered/non-ASCII signature, legacy sha1 header. Event routing, queue outage |
 | `test_worker.py` | 7 | Pipeline with fake GitHub/LLM, four agents start before any finishes, one failing agent does not block the rest, Redis -> RQ worker -> result, COMMENT-only default |
 | `test_agents.py`, `test_deduplicator.py`, `test_dependency_graph.py` | 39 | Agents with a mock LLM, merge/rank logic, import graph |
 | `test_convention_learner.py`, `test_parsing.py`, `test_logging.py` | 14 | Convention learning (3 PRs, JS repos, bad LLM output), tree-sitter function names for Python/JS/TS, numbered prompts and chunk offsets, flat JSON logs |
+| `test_llm_client.py` | 9 | Default/env model, gpt-oss request params (`reasoning_effort`, `include_reasoning=false`, token headroom), fenced/prose-wrapped JSON, empty reasoning-budget replies are retried |
 
 CI (`.github/workflows/ci.yml`) runs four jobs: `pytest` with a Redis service, `flake8`, a Docker build, and an end-to-end job that starts `docker-compose.demo.yml`, sends a signed webhook, requires the review to be posted, and requires an unsigned webhook to be rejected.
 
 ## Limitations
 
-- **Review quality is not measured.** The tests and the demo use mocked or scripted LLM replies; there is no labelled PR set and no precision/recall number yet. Real runs depend on `llama-3.1-8b-instant` through Groq.
+- **Review quality is not measured.** The tests and the demo use mocked or scripted LLM replies; there is no labelled PR set and no precision/recall number yet. Real runs depend on `openai/gpt-oss-20b` through Groq; I have not run the Groq call live, so the reasoning parameters follow Groq's docs and are covered only by request-shape tests.
 - **Tested against fakes, not against live GitHub.** The GitHub client is exercised with an HTTP mock and with `devtools/fake_services.py`, which rejects comments outside the diff the way GitHub does. The GitHub App flow itself needs your own app to try.
 - Agents read whole files (first 6-8k characters per file or chunk), so they can flag code the PR did not touch. Those findings appear in the summary, not inline.
 - Convention learning measures naming, type hints and docstrings only for Python (via `ast`); for JS/TS repos it relies on a single LLM call over the added code.

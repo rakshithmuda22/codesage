@@ -208,3 +208,10 @@ def test_health_reports_the_four_agents(client):
     assert body["agents"] == [
         "BugDetector", "SecurityScanner", "StyleAdvisor", "TestCoverage",
     ]
+
+
+def test_health_reports_the_configured_model(client, monkeypatch):
+    monkeypatch.delenv("GROQ_MODEL", raising=False)
+    assert client.get("/health").json()["model"] == "openai/gpt-oss-20b"
+    monkeypatch.setenv("GROQ_MODEL", "openai/gpt-oss-120b")
+    assert client.get("/health").json()["model"] == "openai/gpt-oss-120b"
