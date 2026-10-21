@@ -23,6 +23,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from core.llm_client import DEFAULT_GROQ_MODEL
 from core.worker import ReviewWorker
 from models.schemas import ReviewJob
 
@@ -137,7 +138,12 @@ async def github_webhook(request: Request) -> JSONResponse:
         body,
         hashlib.sha256,
     ).hexdigest()
-    if not hmac.compare_digest(signature, expected):
+    # Compare as bytes: hmac.compare_digest() raises TypeError on a
+    # non-ASCII str, which would turn a garbage header into a 500.
+    if not hmac.compare_digest(
+        signature.encode("utf-8", errors="replace"),
+        expected.encode(),
+    ):
         logger.warning(
             json.dumps({
                 "timestamp": time.time(),
@@ -159,6 +165,10 @@ async def github_webhook(request: Request) -> JSONResponse:
     except json.JSONDecodeError:
         raise HTTPException(
             status_code=400, detail="Invalid JSON payload"
+        )
+    if not isinstance(payload, dict):
+        raise HTTPException(
+            status_code=400, detail="Payload must be a JSON object"
         )
 
     # 3. Filter events
@@ -321,7 +331,7 @@ async def health() -> JSONResponse:
             "StyleAdvisor",
             "TestCoverage",
         ],
-        "model": "llama-3.1-8b-instant",
+        "model": os.environ.get("GROQ_MODEL", DEFAULT_GROQ_MODEL),
         "queue": "redis",
         "version": "1.0.0",
     })

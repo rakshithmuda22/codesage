@@ -351,7 +351,8 @@ class Deduplicator:
         lines.extend([
             "",
             f"**Files reviewed:** {files_reviewed}",
-            f"**Total analysis time:** {total_time:.1f}s",
+            f"**Combined agent time:** {total_time:.1f}s "
+            "(agents run in parallel, so wall-clock is lower)",
             "",
             "---",
             "*Powered by CodeSage — Autonomous Code Review Agent*",

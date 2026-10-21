@@ -34,6 +34,24 @@ logger = logging.getLogger("codesage")
 QUEUE_NAME = "codesage"
 
 
+def review_event(decision: str) -> str:
+    """Pick the GitHub review event to post.
+
+    By default CodeSage only ever leaves a plain ``COMMENT`` review: a
+    bot silently approving (or blocking) a merge on an LLM's say-so is
+    not a safe default. Set ``CODESAGE_POST_VERDICTS=true`` to post the
+    computed ``APPROVE`` / ``REQUEST_CHANGES`` decision instead.
+
+    Args:
+        decision: Computed decision (APPROVE, REQUEST_CHANGES, COMMENT).
+
+    Returns:
+        The review event to send to GitHub.
+    """
+    flag = os.environ.get("CODESAGE_POST_VERDICTS", "").strip().lower()
+    return decision if flag in ("1", "true", "yes") else "COMMENT"
+
+
 class ReviewWorker:
     """Manages the Redis job queue for code reviews.
 
@@ -287,7 +305,7 @@ async def process_review(
             head_sha=job.head_sha,
             summary_body=summary,
             comments=comments,
-            event=review_decision,
+            event=review_event(review_decision),
             diff_text=diff_text,
         )
 

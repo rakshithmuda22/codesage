@@ -19,6 +19,8 @@ from groq import AsyncGroq, RateLimitError, APIError
 
 logger = logging.getLogger("codesage")
 
+DEFAULT_GROQ_MODEL = "llama-3.1-8b-instant"
+
 
 class LLMClient:
     """Async Groq API client with rate limiting and retry.
@@ -34,7 +36,7 @@ class LLMClient:
     def __init__(
         self,
         api_key: Optional[str] = None,
-        model: str = "llama-3.1-8b-instant",
+        model: Optional[str] = None,
         max_concurrent: int = 5,
         max_calls_per_minute: int = 30,
     ) -> None:
@@ -42,7 +44,8 @@ class LLMClient:
 
         Args:
             api_key: Groq API key. Falls back to GROQ_API_KEY env var.
-            model: Model ID for completions.
+            model: Model ID for completions. Falls back to the
+                GROQ_MODEL env var, then llama-3.1-8b-instant.
             max_concurrent: Maximum concurrent API calls.
             max_calls_per_minute: Rate limit (Groq free tier = 30).
 
@@ -55,7 +58,9 @@ class LLMClient:
                 "GROQ_API_KEY must be set in environment or passed directly"
             )
         self.client = AsyncGroq(api_key=resolved_key)
-        self.model = model
+        self.model = (
+            model or os.environ.get("GROQ_MODEL") or DEFAULT_GROQ_MODEL
+        )
         self.semaphore = asyncio.Semaphore(max_concurrent)
         self.max_calls_per_minute = max_calls_per_minute
         self.call_timestamps: list[float] = []

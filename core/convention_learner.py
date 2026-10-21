@@ -15,6 +15,7 @@ import time
 from typing import Any, Optional
 
 import redis
+from pydantic import ValidationError
 
 from core.github_client import GitHubClient
 from core.llm_client import LLMClient
@@ -106,9 +107,23 @@ class ConventionLearner:
 
         start = time.time()
 
-        merged_prs = await self.github_client.get_recent_merged_prs(
-            repo, limit=MAX_PRS_TO_ANALYZE
-        )
+        try:
+            merged_prs = await self.github_client.get_recent_merged_prs(
+                repo, limit=MAX_PRS_TO_ANALYZE
+            )
+        except Exception as e:
+            # Conventions are a nice-to-have; never fail the review for them.
+            logger.warning(
+                json.dumps({
+                    "timestamp": time.time(),
+                    "level": "WARNING",
+                    "agent": "ConventionLearner",
+                    "job_id": "",
+                    "message": f"Could not fetch merged PRs, using defaults: {e}",
+                    "repo": repo,
+                })
+            )
+            return RepoConventions()
 
         if not merged_prs:
             logger.info(
@@ -326,6 +341,11 @@ class ConventionLearner:
                     )
                     func_lengths.append(length)
 
+        if not func_lengths:
+            # Nothing parsed (e.g. a JS/TS-only PR): say nothing rather than
+            # overriding the LLM's answer with Python defaults.
+            return {}
+
         naming = (
             "snake_case" if snake_count >= camel_count else "camelCase"
         )
@@ -385,7 +405,16 @@ class ConventionLearner:
             if field in merged:
                 safe_fields[field] = merged[field]
 
-        return RepoConventions(**safe_fields)
+        try:
+            return RepoConventions(**safe_fields)
+        except ValidationError:
+            # The LLM returned a wrongly-typed field; keep what the AST
+            # heuristics measured and fall back to defaults for the rest.
+            heuristic_fields = {
+                k: v for k, v in heuristic.items()
+                if k in RepoConventions.model_fields
+            }
+            return RepoConventions(**heuristic_fields)
 
     def _get_cached(self, key: str) -> Optional[RepoConventions]:
         """Retrieve cached conventions from Redis.
