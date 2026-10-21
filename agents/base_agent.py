@@ -176,12 +176,56 @@ class BaseAgent(ABC):
         else:
             target_types = {
                 "function_declaration",
+                "generator_function_declaration",
+                "function",
+                "function_expression",
                 "arrow_function",
                 "method_definition",
             }
 
         self._walk_ast(node, target_types, functions, lines)
         return functions
+
+    @staticmethod
+    def _node_text(node: Any) -> str:
+        """Decode a tree-sitter node's source text."""
+        return node.text.decode("utf-8")
+
+    def _function_name(self, node: Any) -> str:
+        """Resolve a function node's name.
+
+        Named declarations and methods carry a ``name`` field. Arrow
+        functions and function expressions are anonymous in the grammar,
+        so the name comes from what they are assigned to
+        (``const foo = () => ...``, ``{ foo: function () {} }``,
+        ``foo = () => ...``).
+
+        Args:
+            node: A tree-sitter function-like node.
+
+        Returns:
+            The function name, or an empty string if it has none.
+        """
+        name_node = node.child_by_field_name("name")
+        if name_node is not None:
+            return self._node_text(name_node)
+
+        parent = node.parent
+        if parent is None:
+            return ""
+        if parent.type == "variable_declarator":
+            target = parent.child_by_field_name("name")
+        elif parent.type == "pair":
+            target = parent.child_by_field_name("key")
+        elif parent.type == "assignment_expression":
+            target = parent.child_by_field_name("left")
+        elif parent.type in ("public_field_definition", "field_definition"):
+            target = parent.child_by_field_name("name") or parent.child_by_field_name("property")
+        else:
+            return ""
+        if target is None:
+            return ""
+        return self._node_text(target).rsplit(".", 1)[-1]
 
     def _walk_ast(
         self,
@@ -198,17 +242,16 @@ class BaseAgent(ABC):
             functions: Output list to append to.
             lines: Source code lines.
         """
-        if node.type in target_types:
+        if node.type in target_types and node.is_named:
             start_line = node.start_point[0] + 1
             end_line = node.end_point[0] + 1
 
-            name = ""
-            params = ""
-            for child in node.children:
-                if child.type == "identifier" or child.type == "name":
-                    name = child.text.decode("utf-8")
-                elif child.type == "parameters":
-                    params = child.text.decode("utf-8")
+            name = self._function_name(node)
+            params_node = (
+                node.child_by_field_name("parameters")
+                or node.child_by_field_name("parameter")
+            )
+            params = self._node_text(params_node) if params_node else ""
 
             body_lines = lines[start_line - 1:end_line]
             functions.append({
@@ -285,27 +328,49 @@ class BaseAgent(ABC):
         return functions
 
     @staticmethod
-    def chunk_large_file(
-        content: str, max_lines: int = 300
-    ) -> list[str]:
-        """Split large files into overlapping chunks.
+    def number_lines(content: str, start_line: int = 1) -> str:
+        """Prefix every line with its absolute line number.
 
-        Files over 500 lines are split into chunks with 50-line
-        overlap to catch issues at boundaries. Attempts to avoid
-        splitting mid-function.
+        LLMs cannot reliably count lines in a raw code block, so the
+        prompt carries the numbers and the model just reads them back.
+        The numbers match the file on the PR's head commit, which is
+        what GitHub's inline-comment ``line`` refers to.
+
+        Args:
+            content: Source text (a whole file or one chunk of it).
+            start_line: Line number of the first line in ``content``.
+
+        Returns:
+            The text with ``"   12 | code"`` style prefixes.
+        """
+        return "\n".join(
+            f"{n:>5} | {text}"
+            for n, text in enumerate(content.split("\n"), start_line)
+        )
+
+    @staticmethod
+    def chunk_with_offsets(
+        content: str, max_lines: int = 300
+    ) -> list[tuple[int, str]]:
+        """Split a file into overlapping chunks, keeping line offsets.
+
+        Files longer than ``max_lines`` are split with a 50-line overlap
+        to catch issues at boundaries. Attempts to avoid splitting
+        mid-function.
 
         Args:
             content: Full file content string.
             max_lines: Maximum lines per chunk.
 
         Returns:
-            List of chunk strings.
+            List of ``(first_line_number, chunk_text)`` tuples; the
+            line number is 1-based and absolute within the file.
         """
         lines = content.split("\n")
         if len(lines) <= max_lines:
-            return [content]
+            return [(1, content)]
 
-        chunks: list[str] = []
+        chunks: list[tuple[int, str]] = []
         overlap = 50
         start = 0
 
@@ -326,14 +391,35 @@ class BaseAgent(ABC):
                         end = j
                         break
 
-            chunk = "\n".join(lines[start:end])
-            chunks.append(chunk)
+            chunks.append((start + 1, "\n".join(lines[start:end])))
 
             if end >= len(lines):
                 break
             start = end - overlap
 
         return chunks
+
+    @staticmethod
+    def chunk_large_file(
+        content: str, max_lines: int = 300
+    ) -> list[str]:
+        """Split large files into overlapping chunks.
+
+        Thin wrapper over chunk_with_offsets() for callers that do not
+        need the line offsets.
+
+        Args:
+            content: Full file content string.
+            max_lines: Maximum lines per chunk.
+
+        Returns:
+            List of chunk strings.
+        """
+        return [
+            text for _, text in BaseAgent.chunk_with_offsets(
+                content, max_lines
+            )
+        ]
 
     def create_finding(self, **kwargs: Any) -> Finding:
         """Factory method to create a Finding with auto-generated ID.

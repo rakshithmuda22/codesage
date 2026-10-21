@@ -289,7 +289,7 @@ class SecurityScanner(BaseAgent):
             language=file.language or "python",
             filename=file.filename,
             file_purpose=file_purpose,
-            content=file.content[:8000],
+            content=self.number_lines(file.content[:8000]),
         )
 
         try:

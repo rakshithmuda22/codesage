@@ -225,7 +225,9 @@ class TestCoverageAgent(BaseAgent):
             functions=json.dumps(
                 [f["name"] for f in functions]
             ),
-            content=source_file.content[:6000] if source_file.content else "",
+            content=self.number_lines(
+                source_file.content[:6000]
+            ) if source_file.content else "",
             test_filename=test_file.filename,
             test_content=(
                 test_file.content[:4000] if test_file.content else ""
@@ -299,7 +301,9 @@ class TestCoverageAgent(BaseAgent):
             functions=json.dumps(
                 [f["name"] for f in functions]
             ),
-            content=source_file.content[:6000] if source_file.content else "",
+            content=self.number_lines(
+                source_file.content[:6000]
+            ) if source_file.content else "",
         )
 
         try:

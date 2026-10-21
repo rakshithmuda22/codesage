@@ -144,7 +144,7 @@ class StyleAdvisor(BaseAgent):
         prompt = style_prompts.ANALYZE_STYLE_PROMPT.format(
             language=file.language or "python",
             filename=file.filename,
-            content=file.content[:6000],
+            content=self.number_lines(file.content[:6000]),
             naming_style=conventions.naming_style,
             uses_type_hints=conventions.uses_type_hints,
             uses_docstrings=conventions.uses_docstrings,

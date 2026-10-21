@@ -142,14 +142,14 @@ class BugDetector(BaseAgent):
             tree, file.content, file.language or "python"
         )
 
-        chunks = self.chunk_large_file(file.content)
+        chunks = self.chunk_with_offsets(file.content)
         all_findings: list[Finding] = []
 
-        for chunk in chunks:
+        for first_line, chunk in chunks:
             prompt = bug_prompts.ANALYZE_FILE_PROMPT.format(
                 language=file.language or "python",
                 filename=file.filename,
-                content=chunk[:8000],
+                content=self.number_lines(chunk[:8000], first_line),
                 functions=json.dumps(
                     [f["name"] for f in functions]
                 ),
