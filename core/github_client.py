@@ -25,7 +25,10 @@ from models.schemas import ChangedFile
 
 logger = logging.getLogger("codesage")
 
-GITHUB_API = "https://api.github.com"
+GITHUB_API = os.environ.get("GITHUB_API_URL", "https://api.github.com").rstrip("/")
+
+# GitHub rejects review bodies above 65,536 characters.
+MAX_REVIEW_BODY = 60_000
 
 
 def _basic_auth(token: str) -> str:
@@ -33,88 +36,151 @@ def _basic_auth(token: str) -> str:
     return base64.b64encode(f"x-access-token:{token}".encode()).decode()
 
 
-class DiffParser:
-    """Parses unified diffs to map absolute line numbers to diff positions.
+_HUNK_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 
-    GitHub's REST API requires inline review comments to specify a
-    'position' (the line index within the diff hunk), not an absolute
-    line number. This class builds that mapping.
+
+class DiffParser:
+    """Parses a unified diff into the lines GitHub lets you comment on.
+
+    For every file in the diff it records which new-file (RIGHT side)
+    line numbers appear in a hunk, together with the line's diff
+    position. GitHub only accepts inline review comments on lines that
+    are part of the diff, so this map doubles as the "is this line
+    commentable?" check.
+
+    Diff position follows GitHub's definition: the first ``@@`` line of
+    a file is position 0, the line right below it is position 1, and
+    the count keeps increasing across later hunk headers and through
+    the end of that file's diff. File headers (``diff --git``, ``index``,
+    ``---``/``+++``) are not counted.
     """
 
     @staticmethod
     def parse(diff_text: str) -> dict[str, dict[int, int]]:
         """Parse a unified diff into a file -> line -> position map.
 
+        Hunk bodies are consumed using the line counts from each
+        ``@@ -a,b +c,d @@`` header, so a removed line whose text starts
+        with ``--`` (e.g. a deleted SQL comment) is never mistaken for
+        a file header.
+
         Args:
             diff_text: Raw unified diff output (full PR diff).
 
         Returns:
             Dict mapping file paths to dicts of
-            {absolute_line_number: diff_position}.
-            Only lines present in the diff (added or context) are mapped.
+            {new_file_line_number: diff_position}. Only added and
+            context lines are mapped; removed lines have no RIGHT-side
+            line number.
         """
         result: dict[str, dict[int, int]] = {}
         current_file: Optional[str] = None
+        seen_hunk = False
         position = 0
-        current_line = 0
+        new_line = 0
+        old_left = 0
+        new_left = 0
 
-        for line in diff_text.split("\n"):
-            if line.startswith("diff --git"):
-                match = re.search(r"b/(.+)$", line)
-                if match:
-                    current_file = match.group(1)
-                    result[current_file] = {}
-                    position = 0
+        for raw in diff_text.split("\n"):
+            if raw.startswith("diff --git ") or raw.startswith("@@ "):
+                # Hunk body lines start with ' ', '+', '-' or '\\', so these
+                # always begin something new, even if the previous hunk
+                # header's counts were wrong or the diff was truncated.
+                old_left = new_left = 0
+
+            if old_left > 0 or new_left > 0:
+                # Inside a hunk body.
+                if raw.startswith("\\"):
+                    position += 1
+                elif raw.startswith("+"):
+                    new_left -= 1
+                    new_line += 1
+                    position += 1
+                    result[current_file][new_line] = position  # type: ignore[index]
+                elif raw.startswith("-"):
+                    old_left -= 1
+                    position += 1
+                else:
+                    # Context line (a blank one may have lost its space).
+                    old_left -= 1
+                    new_left -= 1
+                    new_line += 1
+                    position += 1
+                    result[current_file][new_line] = position  # type: ignore[index]
                 continue
 
-            if line.startswith("@@"):
-                match = re.search(r"\+(\d+)", line)
-                if match:
-                    current_line = int(match.group(1)) - 1
+            if raw.startswith("\\") and seen_hunk:
+                # "\ No newline at end of file" after a hunk's last line.
                 position += 1
+                continue
+
+            if raw.startswith("diff --git "):
+                current_file = DiffParser._path_from_git_header(raw)
+                result.setdefault(current_file, {})
+                seen_hunk = False
+                position = 0
                 continue
 
             if current_file is None:
                 continue
 
-            if line.startswith("---") or line.startswith("+++"):
-                continue
+            if not seen_hunk:
+                if raw.startswith("rename to "):
+                    current_file = DiffParser._rekey(
+                        result, current_file, raw[len("rename to "):]
+                    )
+                elif raw.startswith("+++ b/"):
+                    current_file = DiffParser._rekey(
+                        result, current_file, raw[len("+++ b/"):].split("\t")[0]
+                    )
 
-            if line.startswith("+"):
-                current_line += 1
-                position += 1
-                result[current_file][current_line] = position
-            elif line.startswith("-"):
-                position += 1
-            else:
-                current_line += 1
-                position += 1
-                result[current_file][current_line] = position
+            match = _HUNK_RE.match(raw)
+            if match:
+                if seen_hunk:
+                    position += 1  # later "@@" lines count; the first is 0
+                seen_hunk = True
+                new_line = int(match.group(3)) - 1
+                # A missing count means 1; an explicit 0 is an empty side.
+                old_left = 1 if match.group(2) is None else int(match.group(2))
+                new_left = 1 if match.group(4) is None else int(match.group(4))
 
         return result
 
     @staticmethod
-    def find_nearest_position(
-        line_map: dict[int, int],
-        target_line: int,
-    ) -> Optional[int]:
-        """Find the nearest valid diff position for a given line.
+    def _path_from_git_header(line: str) -> str:
+        """Extract the file path from a ``diff --git a/X b/Y`` line.
+
+        Paths may themselves contain ``b/`` (``lib/x.py``) or spaces, so
+        this looks for the split point where both halves name the same
+        file and falls back to the last `` b/`` for renames. The
+        ``+++``/``rename to`` lines refine the result afterwards.
 
         Args:
-            line_map: Mapping of line numbers to diff positions.
-            target_line: The absolute line number to locate.
+            line: A line starting with ``diff --git ``.
 
         Returns:
-            The diff position of the nearest mapped line, or None
-            if the file has no mapped lines.
+            Best-effort new-side path of the file.
         """
-        if not line_map:
-            return None
-        if target_line in line_map:
-            return line_map[target_line]
+        rest = line[len("diff --git "):]
+        if not rest.startswith("a/"):
+            return rest
+        candidates = [m.start() for m in re.finditer(r" b/", rest)]
+        for idx in candidates:
+            if rest[2:idx] == rest[idx + 3:]:
+                return rest[idx + 3:]
+        if candidates:
+            return rest[candidates[-1] + 3:]
+        return rest[2:]
 
-        nearest = min(line_map.keys(), key=lambda k: abs(k - target_line))
-        return line_map[nearest]
+    @staticmethod
+    def _rekey(
+        result: dict[str, dict[int, int]], old: str, new: str
+    ) -> str:
+        """Rename a file key in the result map (rename / +++ header)."""
+        if new == old:
+            return old
+        result[new] = result.pop(old, {})
+        return new
 
 
 class GitHubClient:
@@ -410,11 +476,19 @@ class GitHubClient:
         event: str = "COMMENT",
         diff_text: Optional[str] = None,
     ) -> dict[str, Any]:
-        """Post a PR review with inline comments at diff positions.
+        """Post a PR review with inline comments on lines inside the diff.
 
-        Uses DiffParser to convert absolute line numbers to diff
-        positions. Comments that can't be mapped to valid positions
-        are included as part of the summary body instead.
+        GitHub only accepts an inline comment on a line that appears in
+        the PR diff. DiffParser tells us which lines those are; each
+        comment whose ``line`` is one of them is posted inline with
+        ``line``/``side=RIGHT``. Anything else (a finding on an unchanged
+        line outside every hunk, a file not in the diff) is listed in the
+        review summary instead of being moved to a different line.
+
+        If GitHub still rejects the inline comments with a 422 (for
+        example the PR head moved after the webhook fired), the review
+        is re-posted once with every finding in the summary so the
+        feedback is not lost.
 
         Args:
             repo: Repository in owner/repo format.
@@ -423,7 +497,7 @@ class GitHubClient:
             summary_body: Top-level review body (markdown).
             comments: List of dicts with path, line, side, body.
             event: Review event: APPROVE, REQUEST_CHANGES, or COMMENT.
-            diff_text: Raw diff text for position mapping. If None,
+            diff_text: Raw diff text for line mapping. If None,
                 fetched automatically.
 
         Returns:
@@ -435,49 +509,64 @@ class GitHubClient:
         if diff_text is None:
             diff_text = await self.get_pr_diff(repo, pr_number)
 
-        position_map = DiffParser.parse(diff_text)
+        line_maps = DiffParser.parse(diff_text)
 
-        mapped_comments = []
-        unmapped_comments = []
+        mapped_comments: list[dict[str, Any]] = []
+        unmapped_comments: list[dict[str, Any]] = []
 
         for comment in comments:
             file_path = comment["path"]
             line = comment["line"]
 
-            if file_path in position_map:
-                position = DiffParser.find_nearest_position(
-                    position_map[file_path], line
-                )
-                if position is not None:
-                    mapped_comments.append({
-                        "path": file_path,
-                        "position": position,
-                        "body": comment["body"],
-                    })
-                    continue
-
-            unmapped_comments.append(comment)
-
-        if unmapped_comments:
-            summary_body += "\n\n---\n\n**Additional findings:**\n"
-            for c in unmapped_comments:
-                summary_body += (
-                    f"\n- **{c['path']}:{c['line']}** — {c['body']}\n"
-                )
+            if line in line_maps.get(file_path, {}):
+                mapped_comments.append({
+                    "path": file_path,
+                    "line": line,
+                    "side": "RIGHT",
+                    "body": comment["body"],
+                })
+            else:
+                unmapped_comments.append(comment)
 
         headers = await self._authed_headers()
-        body: dict[str, Any] = {
-            "commit_id": head_sha,
-            "body": summary_body,
-            "event": event,
-            "comments": mapped_comments,
-        }
+        url = f"{GITHUB_API}/repos/{repo}/pulls/{pr_number}/reviews"
+
+        def _payload(inline: list[dict[str, Any]],
+                     leftover: list[dict[str, Any]]) -> dict[str, Any]:
+            return {
+                "commit_id": head_sha,
+                "body": self._with_leftovers(summary_body, leftover),
+                "event": event,
+                "comments": inline,
+            }
 
         response = await self._http.post(
-            f"{GITHUB_API}/repos/{repo}/pulls/{pr_number}/reviews",
-            headers=headers,
-            json=body,
+            url, headers=headers,
+            json=_payload(mapped_comments, unmapped_comments),
         )
+        if response.status_code == 422 and mapped_comments:
+            logger.warning(
+                json.dumps({
+                    "timestamp": time.time(),
+                    "level": "WARNING",
+                    "agent": "GitHubClient",
+                    "job_id": "",
+                    "message": (
+                        "GitHub rejected inline comments (422); "
+                        "re-posting findings in the review summary"
+                    ),
+                    "repo": repo,
+                    "pr": pr_number,
+                })
+            )
+            unmapped_comments = unmapped_comments + [
+                c for c in comments if c not in unmapped_comments
+            ]
+            mapped_comments = []
+            response = await self._http.post(
+                url, headers=headers,
+                json=_payload([], unmapped_comments),
+            )
         response.raise_for_status()
 
         logger.info(
@@ -495,6 +584,31 @@ class GitHubClient:
             })
         )
         return response.json()
+
+    @staticmethod
+    def _with_leftovers(
+        summary_body: str, leftover: list[dict[str, Any]]
+    ) -> str:
+        """Append findings that could not be placed inline to the summary.
+
+        Args:
+            summary_body: Top-level review body (markdown).
+            leftover: Comment dicts (path, line, body) not posted inline.
+
+        Returns:
+            The summary body, extended and capped to GitHub's size limit.
+        """
+        body = summary_body
+        if leftover:
+            body += (
+                "\n\n---\n\n**Findings outside the changed lines "
+                "(not attachable inline):**\n"
+            )
+            for c in leftover:
+                body += f"\n- **{c['path']}:{c['line']}** — {c['body']}\n"
+        if len(body) > MAX_REVIEW_BODY:
+            body = body[:MAX_REVIEW_BODY] + "\n\n*(truncated)*"
+        return body
 
     async def get_file_content(
         self, repo: str, path: str, ref: str
