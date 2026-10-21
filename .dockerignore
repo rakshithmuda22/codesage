@@ -1,0 +1,16 @@
+# Keep secrets, local envs and VCS data out of the image build context.
+.git
+.github
+.venv
+venv
+__pycache__
+*.pyc
+.pytest_cache
+.benchmarks
+.env
+.env.*
+!.env.example
+*.pem
+.DS_Store
+tests
+docs

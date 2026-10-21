@@ -1,33 +1,41 @@
-version: "3.9"
+# API + RQ worker + Redis. Needs a .env (see .env.example) and your GitHub App
+# private key at ./private-key.pem. For a run that needs no accounts at all,
+# use docker-compose.demo.yml instead.
+x-codesage-env: &codesage-env
+  # The container always talks to the compose Redis, whatever .env says.
+  REDIS_URL: redis://redis:6379
 
 services:
   app:
     build: .
-    command: uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}
+    command: uvicorn main:app --host 0.0.0.0 --port 8000
     ports:
       - "${PORT:-8000}:8000"
-    env_file: .env
+    env_file:
+      - path: .env
+        required: false
+    environment: *codesage-env
     depends_on:
       - redis
-    volumes:
-      - /tmp:/tmp
-    restart: unless-stopped
-
-  redis:
-    image: redis:7-alpine
-    ports:
-      - "6379:6379"
-    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
     restart: unless-stopped
 
   worker:
     build: .
     command: rq worker codesage --url redis://redis:6379
-    env_file: .env
-    environment:
-      - REDIS_URL=redis://redis:6379
+    env_file:
+      - path: .env
+        required: false
+    environment: *codesage-env
+    volumes:
+      - ./private-key.pem:/app/private-key.pem:ro
     depends_on:
       - redis
-    volumes:
-      - /tmp:/tmp
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    # Loopback only: this Redis has no password.
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
     restart: unless-stopped

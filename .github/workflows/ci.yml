@@ -21,10 +21,10 @@ jobs:
           python-version: "3.11"
           cache: pip
       - run: pip install -r requirements.txt
+      # LLM and GitHub are faked in the tests; Redis is used by the RQ test.
       - run: pytest tests/ -v --tb=short
         env:
           REDIS_URL: redis://localhost:6379
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GITHUB_APP_ID: "test"
           GITHUB_WEBHOOK_SECRET: "test"
 
@@ -43,3 +43,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: docker build -t codesage .
+
+  # Real Redis + API + RQ worker in containers, with fake GitHub/Groq APIs:
+  # send a signed webhook and require the review to be posted.
+  e2e-demo:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose -f docker-compose.demo.yml up --build -d
+      - name: Wait for the API
+        run: |
+          for i in $(seq 1 60); do
+            curl -fs http://localhost:8000/health && exit 0
+            sleep 2
+          done
+          exit 1
+      - name: Send a signed pull_request webhook
+        run: >
+          docker compose -f docker-compose.demo.yml exec -T app
+          python devtools/send_webhook.py
+          --url http://localhost:8000 --fake-url http://fake:9000
+      - name: Unsigned webhook is rejected
+        run: >
+          docker compose -f docker-compose.demo.yml exec -T app
+          python devtools/send_webhook.py --url http://localhost:8000 --unsigned
+      - name: Logs
+        if: failure()
+        run: docker compose -f docker-compose.demo.yml logs
