@@ -1,251 +1,213 @@
-# CodeSage — Autonomous Code Review Agent
+# CodeSage
 
-> 4 parallel AI agents that review your PRs and post real inline GitHub comments
+**A GitHub App that reviews pull requests with four concurrent agents (bugs, security, style, tests) and posts inline comments on the exact changed lines.**
 
+[![CI](https://github.com/rakshithmuda22/codesage/actions/workflows/ci.yml/badge.svg)](https://github.com/rakshithmuda22/codesage/actions/workflows/ci.yml)
 [![Python 3.11](https://img.shields.io/badge/python-3.11-blue.svg)](https://www.python.org/downloads/release/python-3110/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.109-009688.svg)](https://fastapi.tiangolo.com)
-[![Groq](https://img.shields.io/badge/Groq-LLaMA%203.1-orange.svg)](https://console.groq.com)
+[![Groq](https://img.shields.io/badge/Groq-Llama%203.1-orange.svg)](https://console.groq.com)
 [![Redis](https://img.shields.io/badge/Redis-7-red.svg)](https://redis.io)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![CI](https://github.com/rakshithmuda22/codesage/actions/workflows/ci.yml/badge.svg)](https://github.com/rakshithmuda22/codesage/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-## Why I Built This
+## The problem
 
-By 2026, 54% of PRs in production codebases receive AI-powered analysis, and engineering teams report 40% faster merge cycles. But most AI code review tools treat every repo the same — generic rules applied generically. CodeSage is different: it **learns your repo's conventions** from past merged PRs and checks new code against your team's actual patterns, not textbook rules.
+LLM review bots tend to fail in two boring ways. Their comments land on the wrong line, or GitHub rejects the whole review because a comment points outside the diff. And their style advice is textbook rules, not what *your* repo actually does.
 
-## Technical Highlights
+CodeSage is built around those two problems:
 
-- **Convention learning:** StyleAdvisor analyzes the last 3 merged PRs to learn your repo's naming conventions, import patterns, and code style — then enforces them
-- **True parallel execution:** 4 agents run simultaneously via `asyncio.gather()` with `return_exceptions=True` — one failing agent doesn't block the others
-- **Cross-agent deduplication:** When BugDetector and SecurityScanner flag the same line, findings are merged with combined tags `[SECURITY][BUG]` and highest severity wins
-- **Diff position mapping:** Inline GitHub comments land at the exact right line using a custom diff-position mapper (GitHub's API requires diff-relative positions, not absolute line numbers)
-- **tree-sitter AST parsing:** Language-agnostic code analysis across Python, JavaScript, and TypeScript with a single parsing engine
-- **GitHub App auth:** JWT → installation token flow (not PATs), with RQ workers for async processing
+- **Comments are placed by parsing the PR diff**, and only lines GitHub will accept are posted inline. Everything else goes in the review summary rather than being moved to a "nearby" line.
+- **StyleAdvisor checks code against conventions learned from the repo's last three merged PRs** instead of generic rules.
 
----
+## What it does
 
-## Architecture
+1. GitHub sends a `pull_request` webhook (`opened` / `synchronize`). FastAPI verifies the HMAC signature and enqueues a job in Redis (RQ). The request returns immediately.
+2. An RQ worker fetches the PR's files and diff through the GitHub App API, builds an import dependency graph (each changed file is scored by how many other changed files depend on it), and loads the repo's conventions (learned from the last 3 merged PRs, cached in Redis for 24 h).
+3. Four agents run concurrently with `asyncio.gather()`; one agent failing does not stop the others:
+   - **BugDetector**: null dereferences, off-by-one, resource leaks and similar (LLM).
+   - **SecurityScanner**: regex pass for secrets, `eval`, `shell=True`, weak hashes, `innerHTML` and similar, plus an LLM pass on security-sensitive files.
+   - **StyleAdvisor**: deviations from the learned conventions (LLM, severity capped at MEDIUM).
+   - **TestCoverage**: finds the matching test file in the PR and flags functions with no test (LLM, with a non-LLM fallback).
+4. Findings are de-duplicated (findings on the same file within 3 lines that look alike are merged, highest severity wins), mapped onto the diff, and posted as one review.
 
+Python, JavaScript and TypeScript sources are reviewed; functions are extracted with tree-sitter.
+
+## Example
+
+This is real output from the offline demo below. The "LLM" in that demo is a scripted stand-in (`devtools/fake_services.py`), so it shows the plumbing (webhook, queue, concurrency, line mapping), not model quality.
+
+```text
+$ python devtools/send_webhook.py
+POST http://localhost:8000/webhook/github  signature=sha256=213221468ab7c7ef1...
+-> 200 {"status":"queued","job_id":"adc7a3d2-79d8-47f8-8d97-ab78a6f195c7","rq_job_id":"ee93d342-..."}
+job adc7a3d2: queued  (+0.0s)
+job adc7a3d2: started  (+0.5s)
+job adc7a3d2: finished  (+1.1s)
+decision=REQUEST_CHANGES findings=10 (critical=2 high=3 medium=3 low=2) files=2 pipeline=0.2s
+
+Review posted to PR #42 (event=COMMENT, 9 inline comments)
+  lib/auth.py:4   CRITICAL: Hardcoded secret detected
+      on: API_KEY = "sk-live-9f8e7d6c5b4a3210"
+  lib/auth.py:20  CRITICAL: SQL injection through f-string query
+      on: query = f"SELECT * FROM users WHERE name = '{username}'"
+  web/cart.js:5   HIGH: Loop runs one past the end of items
+      on: for (let i = 0; i <= items.length; i++) {
+  ...
+Not attachable inline (line outside every hunk), listed in the summary instead:
+  lib/auth.py:13
 ```
-GitHub PR Opened
-      |
-      v
-GitHub Webhook --> FastAPI /webhook --> Redis Queue
-                        |                    |
-                   Return 200           RQ Worker picks up job
-                   immediately               |
-                                    +--------+--------+
-                              Repo Analyzer      Convention Learner
-                              (get files,        (learn patterns
-                               build dep graph)   from past PRs)
-                                    |
-                   +----------+----------+----------+
-                   v          v          v          v
-              BugDetector SecurityScanner StyleAdvisor TestCoverage
-              (asyncio parallel -- all 4 run simultaneously)
-                   |          |          |          |
-                   +----------+----------+----------+
-                                    |
-                              Deduplicator
-                              (merge + rank)
-                                    |
-                         GitHub PR Review API
-                         (inline comments at
-                          exact file:line)
-```
 
-## How It Works
+The SQL injection comment is one finding merged from two agents:
 
-1. **Webhook** — When a PR is opened or updated, GitHub sends a webhook to CodeSage
-2. **Queue** — The webhook returns 200 immediately and enqueues the review job to Redis
-3. **Analyze** — The RQ worker clones the repo, builds a dependency graph, and learns the repo's conventions
-4. **Review** — 4 specialized AI agents analyze the code in parallel using asyncio.gather()
-5. **Post** — Findings are deduplicated, ranked, and posted as real inline GitHub comments
-
-## Agent Examples
-
-### BugDetector
-Finds logic errors, null dereferences, off-by-one errors:
-
-> **HIGH: Possible None dereference on user.profile**
+> **🚨 CRITICAL: SQL injection through f-string query**
 >
-> `user.profile` can be None when the user has not completed onboarding, but `.name` is accessed without a null check on line 42.
+> **BugDetector**: A username containing a quote breaks the query.
 >
-> **Suggestion:** Add a None check before accessing .name
-
-### SecurityScanner
-Catches secrets, injection, OWASP Top 10:
-
-> **CRITICAL: Hardcoded API key detected**
+> **SecurityScanner**: username is interpolated into the SQL string; ' OR '1'='1 returns every row.
 >
-> API key is hardcoded in source code at line 17. This will be exposed in version control.
+> **Suggestion:** Pass the value as a bound parameter. | Use a parameterised query: db.execute(sql, (username,)).
 >
-> **Suggestion:** Use environment variables via `os.environ.get("API_KEY")`
+> *Detected by CodeSage BugDetector, SecurityScanner*
 
-### StyleAdvisor
-Learns your repo's conventions and checks for deviations:
+## Quickstart
 
-> **LOW: Function uses camelCase but repo uses snake_case**
->
-> Function `getUserData` on line 28 uses camelCase naming, but this project consistently uses snake_case.
->
-> **Suggestion:** Rename to `get_user_data`
+### Try it with no accounts (Docker)
 
-### TestCoverage
-Identifies untested code paths:
-
-> **MEDIUM: No test for validate_email()**
->
-> The `validate_email` function has no corresponding test case. It handles user input validation which is critical for data integrity.
->
-> **Suggestion:** Add tests for: valid email, invalid format, empty string, special characters
-
-## Quick Start
-
-### 1. Create a GitHub App
-
-Go to [GitHub Settings > Developer settings > GitHub Apps](https://github.com/settings/apps) and create a new app:
-
-- **Webhook URL:** Your server URL + `/webhook/github`
-- **Permissions:** Pull Requests (read & write), Contents (read)
-- **Events:** Pull request
-- Generate a private key and download it
-
-### 2. Get a Groq API Key
-
-Sign up at [console.groq.com](https://console.groq.com) (free tier includes 30 requests/minute).
-
-### 3. Configure Environment
+Runs real Redis, API and RQ worker containers against a fake GitHub API and a scripted stand-in for Groq. Nothing is written to GitHub and no API key is needed.
 
 ```bash
-cp .env.example .env
-# Edit .env with your GitHub App ID, private key path, webhook secret, and Groq API key
-```
-
-### 4. Start with Docker
-
-```bash
-docker-compose up --build
-```
-
-### 5. Connect GitHub App
-
-In your GitHub App settings, set the webhook URL to your server's public URL:
-- Local development: use ngrok (see below)
-- Production: your server's domain + `/webhook/github`
-
-## Development Setup
-
-```bash
-# Clone and install
 git clone https://github.com/rakshithmuda22/codesage.git && cd codesage
+docker compose -f docker-compose.demo.yml up --build -d
+docker compose -f docker-compose.demo.yml exec app python devtools/send_webhook.py --fake-url http://fake:9000
+docker compose -f docker-compose.demo.yml logs worker      # JSON log line per pipeline step
+docker compose -f docker-compose.demo.yml down -v
+```
+
+`send_webhook.py --unsigned` and `--bad-signature` send requests the server must reject with `401`.
+
+### Run the agents on their own (no Docker, no Redis)
+
+```bash
+python3.11 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-
-# Start Redis
-docker run -d -p 6379:6379 redis:7-alpine
-
-# Start the API server
-uvicorn main:app --reload --port 8000
-
-# Start a worker (separate terminal)
-rq worker codesage --url redis://localhost:6379
+python demo_review.py                                  # bundled sample PR, scripted LLM
+CODESAGE_TARGET_REPO=path/to/dir python demo_review.py # any local dir; only the regex scanner can find things
+pytest
 ```
 
-### Local Webhook Testing with ngrok
+### Use it on a real repository
+
+1. Create a [GitHub App](https://github.com/settings/apps): webhook URL `https://<your-host>/webhook/github`, a webhook secret, permissions *Pull requests: read & write* and *Contents: read*, event *Pull request*. Generate a private key and save it as `./private-key.pem`. Install the app on a repo.
+2. Get a [Groq API key](https://console.groq.com).
+3. `cp .env.example .env` and fill in `GITHUB_APP_ID`, `GITHUB_WEBHOOK_SECRET`, `GROQ_API_KEY`.
+4. `docker compose up --build` (API on `:8000`, worker, Redis). For local development expose the port with a tunnel such as ngrok.
+
+CodeSage uses a **GitHub App** (JWT signed with the private key, exchanged for an installation token), not an OAuth App or a personal token. A `401` from GitHub usually means the wrong App ID or key.
+
+To exercise the signature check by hand:
 
 ```bash
-# Install ngrok and expose port 8000
-ngrok http 8000
-
-# Copy the https URL (e.g., https://abc123.ngrok.io)
-# Set it as your GitHub App's webhook URL: https://abc123.ngrok.io/webhook/github
-```
-
-### Test the Webhook Locally
-
-Signature verification is always on — a valid `X-Hub-Signature-256` is required and cannot be bypassed (a missing `GITHUB_WEBHOOK_SECRET` returns `503`, an invalid signature returns `401`). Set a known secret in your `.env` (e.g. `GITHUB_WEBHOOK_SECRET=test-secret`), then sign the exact payload with that same secret:
-
-```bash
-SECRET="test-secret"   # must match GITHUB_WEBHOOK_SECRET in your .env
-PAYLOAD='{"action":"opened","pull_request":{"number":1,"title":"Test PR","head":{"sha":"abc123"},"base":{"sha":"def456"}},"repository":{"full_name":"owner/repo"},"installation":{"id":12345}}'
+SECRET="demo-webhook-secret"   # must equal GITHUB_WEBHOOK_SECRET
+PAYLOAD='{"action":"opened","pull_request":{"number":42,"title":"Test PR","head":{"sha":"abc123"},"base":{"sha":"def456"}},"repository":{"full_name":"acme/shop"},"installation":{"id":12345}}'
 SIG=$(printf '%s' "$PAYLOAD" | openssl dgst -sha256 -hmac "$SECRET" | awk '{print $NF}')
-
 curl -X POST http://localhost:8000/webhook/github \
-  -H "Content-Type: application/json" \
-  -H "X-GitHub-Event: pull_request" \
-  -H "X-Hub-Signature-256: sha256=$SIG" \
-  -d "$PAYLOAD"
+  -H "Content-Type: application/json" -H "X-GitHub-Event: pull_request" \
+  -H "X-Hub-Signature-256: sha256=$SIG" -d "$PAYLOAD"
 ```
 
-## Common Setup Mistake
+### Configuration
 
-**GitHub App vs. OAuth App confusion.** CodeSage uses a **GitHub App** (not an OAuth App). The key differences:
+| Variable | Purpose |
+|---|---|
+| `GITHUB_APP_ID`, `GITHUB_PRIVATE_KEY_PATH` | GitHub App credentials |
+| `GITHUB_WEBHOOK_SECRET` | Required. If unset the webhook answers `503`; a missing or wrong signature gets `401` |
+| `GROQ_API_KEY`, `GROQ_MODEL` | Groq key and model (default `llama-3.1-8b-instant`) |
+| `REDIS_URL` | Redis for the queue and the convention cache |
+| `CODESAGE_POST_VERDICTS` | `true` to post `APPROVE` / `REQUEST_CHANGES`. Default: every review is a plain `COMMENT`, so the bot never approves or blocks a merge |
+| `GITHUB_API_URL`, `GROQ_BASE_URL` | Point at GitHub Enterprise, or at the fakes used by the demo |
+| `LOG_LEVEL`, `PORT` | Logging level, API port |
 
-- **GitHub App** authenticates with a JWT signed by a private key, then exchanges it for an installation token. This is what CodeSage uses.
-- **OAuth App** uses client ID/secret for user-level authorization. This does NOT work for posting PR reviews as a bot.
+## How it works
 
-If you see `401 Unauthorized` errors, verify you're using a GitHub App with the correct private key and app ID.
-
-## Project Structure
-
-```
-codesage/
-├── main.py                    # FastAPI webhook receiver
-├── agents/
-│   ├── base_agent.py          # Abstract base with tree-sitter parsing
-│   ├── bug_detector.py        # Logic errors, null risks, off-by-one
-│   ├── security_scanner.py    # Secrets, injection, OWASP Top 10
-│   ├── style_advisor.py       # Convention-aware style checking
-│   └── test_coverage.py       # Untested code path detection
-├── core/
-│   ├── github_client.py       # GitHub App auth + PR review posting
-│   ├── llm_client.py          # Groq API with rate limiting + retry
-│   ├── repo_analyzer.py       # Changed file processing
-│   ├── dependency_graph.py    # NetworkX dependency graph
-│   ├── convention_learner.py  # Learn patterns from merged PRs
-│   ├── deduplicator.py        # Cross-agent finding merge + rank
-│   └── worker.py              # Redis queue worker + orchestration
-├── models/
-│   └── schemas.py             # Pydantic models
-├── prompts/                   # LLM prompt templates
-├── static/
-│   └── index.html             # Dashboard
-├── tests/                     # Pytest suite
-├── docs/adr/                  # Architecture Decision Records
-├── Dockerfile
-├── docker-compose.yml
-└── requirements.txt
+```mermaid
+flowchart LR
+  GH[GitHub<br/>pull_request] -->|signed webhook| API[FastAPI<br/>HMAC check]
+  API -->|enqueue| R[(Redis)]
+  R --> W[RQ worker]
+  W --> F[PR files + diff]
+  F --> C[Learn conventions<br/>last 3 merged PRs<br/>cached 24 h]
+  C --> G{asyncio.gather}
+  G --> B[BugDetector]
+  G --> S[SecurityScanner]
+  G --> St[StyleAdvisor]
+  G --> T[TestCoverage]
+  B --> D[Deduplicate + rank]
+  S --> D
+  St --> D
+  T --> D
+  D --> M[Map findings<br/>to diff lines]
+  M -->|one review| GH
 ```
 
-## Technical Deep Dive
+### Getting comments onto the right line
 
-### Diff Position Mapping
+GitHub only accepts an inline review comment on a line that is part of the PR diff. `core/github_client.py` handles this in four steps:
 
-GitHub's REST API requires inline review comments to specify a **diff position** (not an absolute line number). The `DiffParser` class in `github_client.py` parses the unified diff output to build a mapping from absolute line numbers to diff-relative positions. Without this, every inline comment would fail with `422 Unprocessable Entity`.
+1. `DiffParser` reads the unified diff hunk by hunk (using the line counts in each `@@` header, so a removed `-- sql comment` is not mistaken for a file header) and records every new-file line that appears in the diff, along with its diff position.
+2. The prompts carry absolute line numbers (`  12 | code`) and large files are split in chunks that keep their offsets, so the line numbers the model returns are file line numbers.
+3. A finding whose line is in the diff is posted with `line` + `side=RIGHT`. Any other finding is listed in the review summary instead of being snapped to a nearby line.
+4. If GitHub still answers `422` (for example the PR head moved), the review is re-posted once with every finding in the summary.
 
-### Tree-sitter AST Parsing
+An earlier version of this parser keyed files by the text after the first `b/` (so `lib/auth.py` became `auth.py b/lib/auth.py`) and counted `index` / `---` / `+++` lines as diff positions, so inline comments were silently dropped or misplaced. The tests below pin the fixed behaviour.
 
-Agents use tree-sitter to build a concrete syntax tree for each file. This enables accurate function extraction across Python, JavaScript, and TypeScript with a single API. The `tree-sitter-languages` package pre-compiles grammars, eliminating the need for C compilers at runtime.
+### Concurrency and rate limits
 
-### Parallel Agent Execution
+All four agents run under one `asyncio.gather(..., return_exceptions=True)`, and each agent analyses its files concurrently. `LLMClient` allows 5 calls in flight and 30 calls per minute (a sliding window, configured for Groq's free tier), retries with backoff (up to 3 attempts), re-asking for strict JSON after a malformed reply. RQ jobs are enqueued with `Retry(max=2, interval=[30, 120])`.
 
-All 4 agents run simultaneously via `asyncio.gather()`. Each agent processes files concurrently using per-file async tasks. The Groq client uses a semaphore (max 5 concurrent calls) and a token bucket rate limiter (30 calls/min) to stay within free-tier limits.
+## Tests and CI
 
-### Convention Learning
-
-Before reviewing, CodeSage fetches the last 3 merged PRs and analyzes the code patterns using both AST heuristics and LLM analysis. Results are cached in Redis for 24 hours. This means the StyleAdvisor checks code against the repo's own conventions, not generic rules.
-
-### Cross-Agent Deduplication
-
-When BugDetector and SecurityScanner both flag the same line, the Deduplicator merges them into a single comment with combined tags `[SECURITY][BUG]`, uses the highest severity, and merges descriptions from both agents.
-
-## Running Tests
-
-```bash
-pytest tests/ -v --tb=short
+```text
+$ pytest
+126 passed
 ```
 
-As of the latest `main`, the suite is **38** pytest tests covering agents, GitHub flows, and workers (external calls mocked).
+(`tests/test_worker.py::test_job_goes_through_redis_and_an_rq_worker` needs a Redis on `REDIS_URL` and is skipped without one.)
+
+| Area | Tests | What is checked |
+|---|---|---|
+| `test_diff_parser.py` | 39 | Hand-computed positions; paths containing `b/`; `--`/`++` content lines; renames, deletes, binary files, "No newline" markers; 25 randomized runs against real `git diff` output that verify every mapped line points at the same text in the new file |
+| `test_github_review.py` | 6 | JSON sent to GitHub (line/side), out-of-diff findings go to the summary, 422 fallback, body size cap |
+| `test_webhook.py` | 21 | Fails closed: no secret, no/wrong/tampered/non-ASCII signature, legacy sha1 header. Event routing, queue outage |
+| `test_worker.py` | 7 | Pipeline with fake GitHub/LLM, four agents start before any finishes, one failing agent does not block the rest, Redis -> RQ worker -> result, COMMENT-only default |
+| `test_agents.py`, `test_deduplicator.py`, `test_dependency_graph.py` | 39 | Agents with a mock LLM, merge/rank logic, import graph |
+| `test_convention_learner.py`, `test_parsing.py`, `test_logging.py` | 14 | Convention learning (3 PRs, JS repos, bad LLM output), tree-sitter function names for Python/JS/TS, numbered prompts and chunk offsets, flat JSON logs |
+
+CI (`.github/workflows/ci.yml`) runs four jobs: `pytest` with a Redis service, `flake8`, a Docker build, and an end-to-end job that starts `docker-compose.demo.yml`, sends a signed webhook, requires the review to be posted, and requires an unsigned webhook to be rejected.
+
+## Limitations
+
+- **Review quality is not measured.** The tests and the demo use mocked or scripted LLM replies; there is no labelled PR set and no precision/recall number yet. Real runs depend on `llama-3.1-8b-instant` through Groq.
+- **Tested against fakes, not against live GitHub.** The GitHub client is exercised with an HTTP mock and with `devtools/fake_services.py`, which rejects comments outside the diff the way GitHub does. The GitHub App flow itself needs your own app to try.
+- Agents read whole files (first 6-8k characters per file or chunk), so they can flag code the PR did not touch. Those findings appear in the summary, not inline.
+- Convention learning measures naming, type hints and docstrings only for Python (via `ast`); for JS/TS repos it relies on a single LLM call over the added code.
+- A `synchronize` event posts a fresh review; earlier comments are not resolved or de-duplicated.
+- `/`, `/jobs` and `/jobs/{id}` are unauthenticated and the job list is in memory. Do not expose them for private repos.
+- Python, JavaScript and TypeScript only.
+
+## Project layout
+
+```text
+main.py                  FastAPI app: webhook, /jobs, /health, dashboard
+core/worker.py           RQ enqueue + the review pipeline
+core/github_client.py    GitHub App auth, DiffParser, review posting
+core/llm_client.py       Groq client: rate limit, retry, JSON parsing
+core/convention_learner.py, deduplicator.py, dependency_graph.py, repo_analyzer.py
+agents/                  BugDetector, SecurityScanner, StyleAdvisor, TestCoverage
+prompts/                 prompt templates
+devtools/                fake GitHub + Groq APIs, signed-webhook sender (demo and CI only)
+docker-compose.yml       API + worker + Redis
+docker-compose.demo.yml  same stack against the fakes, no accounts needed
+docs/adr/                design decisions: tree-sitter, parallel agents, Redis queue
+```
 
 ## License
 
