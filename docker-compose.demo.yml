@@ -1,0 +1,69 @@
+# Whole stack, no accounts needed: real Redis + API + RQ worker, with a fake
+# GitHub API and a scripted stand-in for Groq (devtools/fake_services.py).
+#
+#   docker compose -f docker-compose.demo.yml up --build -d
+#   python devtools/send_webhook.py
+#   docker compose -f docker-compose.demo.yml down -v
+#
+# Do not use this file for a real deployment: the webhook secret is public.
+x-demo-env: &demo-env
+  GITHUB_API_URL: http://fake:9000
+  GROQ_BASE_URL: http://fake:9000
+  GROQ_API_KEY: demo-not-a-real-key
+  GITHUB_APP_ID: "12345"
+  GITHUB_PRIVATE_KEY_PATH: /keys/private-key.pem
+  GITHUB_WEBHOOK_SECRET: demo-webhook-secret
+  REDIS_URL: redis://redis:6379
+
+services:
+  redis:
+    image: redis:7-alpine
+
+  fake:
+    build: .
+    command: uvicorn devtools.fake_services:app --host 0.0.0.0 --port 9000
+    ports:
+      - "127.0.0.1:${FAKE_PORT:-9000}:9000"
+
+  keygen:
+    build: .
+    # A throwaway RSA key so the worker can sign its GitHub App JWT.
+    command:
+      - python
+      - -c
+      - |
+        from cryptography.hazmat.primitives import serialization as s
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        pem = key.private_bytes(
+            s.Encoding.PEM, s.PrivateFormat.PKCS8, s.NoEncryption()
+        )
+        open("/keys/private-key.pem", "wb").write(pem)
+    volumes:
+      - demo-keys:/keys
+
+  app:
+    build: .
+    command: uvicorn main:app --host 0.0.0.0 --port 8000
+    ports:
+      - "127.0.0.1:${PORT:-8000}:8000"
+    environment: *demo-env
+    depends_on:
+      - redis
+
+  worker:
+    build: .
+    command: rq worker codesage --url redis://redis:6379
+    environment: *demo-env
+    volumes:
+      - demo-keys:/keys:ro
+    depends_on:
+      redis:
+        condition: service_started
+      fake:
+        condition: service_started
+      keygen:
+        condition: service_completed_successfully
+
+volumes:
+  demo-keys:

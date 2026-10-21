@@ -1,7 +1,15 @@
-"""Demo script: Run CodeSage agents against a local codebase.
+"""Demo script: run the four CodeSage agents with no GitHub, Redis or API key.
 
-Simulates the full review pipeline without GitHub webhooks.
-Reads files directly from disk and runs all 4 agents in parallel.
+By default it reviews the sample pull request bundled in
+``devtools/fake_services.py`` (the same one the docker demo uses) and
+answers the LLM prompts with that module's scripted stand-in, so the
+output is deterministic. The regex SecurityScanner, tree-sitter parsing,
+dependency graph, parallel agent execution, deduplication and comment
+formatting are all the real code.
+
+    python demo_review.py                      # bundled sample PR
+    CODESAGE_TARGET_REPO=path/to/dir python demo_review.py
+                                               # any local dir, regex-only
 """
 
 from __future__ import annotations
@@ -23,10 +31,11 @@ from agents.style_advisor import StyleAdvisor
 from agents.test_coverage import TestCoverageAgent
 from core.deduplicator import Deduplicator
 from core.dependency_graph import DependencyGraphBuilder
+from devtools.fake_services import HEAD_FILES, scripted_answer
 from models.schemas import AgentResult, ChangedFile, RepoConventions
 
-# Target repo to analyze
-TARGET_REPO = os.environ.get("CODESAGE_TARGET_REPO", os.path.expanduser("~/repos/sample-repo"))
+# Optional: review a local directory instead of the bundled sample PR.
+TARGET_REPO = os.environ.get("CODESAGE_TARGET_REPO", "")
 
 LANGUAGE_MAP = {
     ".py": "python",
@@ -85,42 +94,53 @@ def load_files_from_disk(repo_path: str) -> list[ChangedFile]:
     return files
 
 
-class MockLLMClient:
-    """Mock LLM that returns empty findings for demo.
+class ScriptedLLM:
+    """Stand-in for Groq: regexes over the prompt, not a language model.
 
-    In production, this would call the real Groq API.
-    For demo purposes, we show the regex-based security
-    scanner and AST-based analysis working without LLM.
+    Without a target directory it answers the sample PR's prompts with
+    the scripted findings. For an arbitrary directory it returns no LLM
+    findings, so only the regex SecurityScanner contributes.
     """
 
-    async def complete(self, **kwargs):
-        """Return empty findings (LLM not connected in demo).
+    def __init__(self, scripted: bool) -> None:
+        self.scripted = scripted
+
+    async def complete(self, system_prompt="", user_prompt="", **kwargs):
+        """Return scripted (or empty) findings for a prompt.
 
         Returns:
-            Dict with empty findings list.
+            Dict with a "findings" list.
         """
+        if self.scripted:
+            return scripted_answer(system_prompt, user_prompt)
         return {"findings": []}
 
-    async def complete_with_structured_output(self, **kwargs):
-        """Return empty findings.
 
-        Returns:
-            Dict with empty findings list.
-        """
-        return {"findings": []}
+def sample_pr_files() -> list[ChangedFile]:
+    """The bundled sample PR's head files as ChangedFile objects."""
+    return [
+        ChangedFile(
+            filename=name,
+            status="modified",
+            additions=len(text.splitlines()),
+            content=text,
+            language=LANGUAGE_MAP[os.path.splitext(name)[1]],
+        )
+        for name, text in sorted(HEAD_FILES.items())
+    ]
 
 
 async def run_demo():
     """Run the full CodeSage review pipeline on a local repo."""
     print("=" * 70)
     print("  CodeSage Demo Review")
-    print(f"  Target: {TARGET_REPO}")
+    print(f"  Target: {TARGET_REPO or 'bundled sample PR (acme/shop#42)'}")
     print("=" * 70)
     print()
 
     # Step 1: Load files
-    print("[1/5] Loading files from disk...")
-    files = load_files_from_disk(TARGET_REPO)
+    print("[1/5] Loading files...")
+    files = load_files_from_disk(TARGET_REPO) if TARGET_REPO else sample_pr_files()
     print(f"      Found {len(files)} source files:")
     for f in files:
         print(f"        - {f.filename} ({f.language}, {f.additions} lines)")
@@ -143,7 +163,7 @@ async def run_demo():
     print()
 
     # Step 3: Set conventions (simulated - normally learned from PRs)
-    print("[3/5] Using default conventions (no merged PRs to learn from)...")
+    print("[3/5] Using default conventions (the real pipeline learns them from merged PRs)...")
     conventions = RepoConventions(
         naming_style="snake_case",
         uses_type_hints=True,
@@ -155,10 +175,12 @@ async def run_demo():
 
     # Step 4: Run all 4 agents IN PARALLEL
     print("[4/5] Running 4 agents in parallel...")
-    print("      (Using mock LLM - regex SecurityScanner active)")
+    print("      (LLM = scripted stand-in, not a real model)"
+          if not TARGET_REPO else
+          "      (no LLM: only the regex SecurityScanner can find things)")
     print()
 
-    llm = MockLLMClient()
+    llm = ScriptedLLM(scripted=not TARGET_REPO)
     agents = [
         BugDetector(llm),
         SecurityScanner(llm),
@@ -215,7 +237,7 @@ async def run_demo():
             if f.suggestion:
                 print(f"      Suggestion: {f.suggestion[:150]}")
     else:
-        print("  No findings (LLM-dependent agents need real API key)")
+        print("  No findings")
 
     print()
     print("=" * 70)
@@ -238,7 +260,10 @@ async def run_demo():
         agent_results,
         {
             "pr_title": "Demo Codebase Review",
-            "repo_full_name": os.path.basename(os.path.normpath(TARGET_REPO)),
+            "repo_full_name": (
+                os.path.basename(os.path.normpath(TARGET_REPO))
+                if TARGET_REPO else "acme/shop"
+            ),
         },
     )
     for line in summary.split("\n"):
